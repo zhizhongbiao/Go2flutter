@@ -15,6 +15,11 @@ android {
         versionCode = 1
         versionName = "1.0"
 
+        ndk {
+            // Filter for architectures supported by Flutter
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -40,6 +45,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":flutter"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
