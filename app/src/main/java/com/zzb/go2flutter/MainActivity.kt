@@ -13,24 +13,51 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
+import com.zzb.go2flutter.flutter.ChannelManager
+import com.zzb.go2flutter.flutter.FlutterEngineManager
 import com.zzb.go2flutter.ui.theme.Go2flutterTheme
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.plugin.common.MethodCall
+import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), ( MethodCall, MethodChannel.Result) -> Unit {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             Go2flutterTheme {
-                Scaffold( modifier = Modifier.fillMaxSize() ) { innerPadding ->
+                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Greeting(
                         name = "Flutter",
-                        modifier = Modifier.padding(innerPadding).clickable{
-                            Toast.makeText(this, "Fuck go 2 Flutter", Toast.LENGTH_SHORT).show()
-                        }
+                        modifier = Modifier
+                            .padding(innerPadding)
+                            .clickable {
+                                Toast.makeText(this, "Fuck go 2 Flutter", Toast.LENGTH_SHORT).show()
+//                            startActivity(FlutterActivity.createDefaultIntent(this))
+                                startActivity(
+                                    FlutterActivity
+                                        .withCachedEngine("Flutter")
+                                        .build(this)
+                                )
+                            }
                     )
                 }
             }
         }
+
+        ChannelManager
+            .initChannel(
+                FlutterEngineManager
+                    .getFlutterEngine(this,"Flutter"))
+            .channelHandler=
+            this@MainActivity
+    }
+
+    override fun invoke(
+        p1: MethodCall,
+        p2: MethodChannel.Result
+    ) {
+        Toast.makeText(this,"Ffffffdfhg", Toast.LENGTH_LONG).show()
     }
 }
 
