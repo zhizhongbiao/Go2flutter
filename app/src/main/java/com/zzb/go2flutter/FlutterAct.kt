@@ -5,5 +5,5 @@ import io.flutter.embedding.android.FlutterActivity
 class FlutterAct: FlutterActivity() {
 
 
-    override fun getInitialRoute()="/myPage"
+    override fun getInitialRoute()="/riverpod"
 }

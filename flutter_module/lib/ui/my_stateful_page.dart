@@ -21,10 +21,25 @@ class _MyStatefulPageState extends State<MyStatefulPage> {
     super.initState();
   }
 
+  @override
+  void setState(VoidCallback fn) {
+    // TODO: implement setState
+    super.setState(fn);
+  }
+
   void _go2StatelessPage() {
     Navigator.of(
       context,
     ).push(MaterialPageRoute(builder: (context) => const MyStatelessPage()));
+
+    /**
+     * 执行该函数会标记该State对象需要重新构建，
+     * Flutter框架会在下一帧调用对应该state的widget需要build方法来更新UI。
+     */
+    setState((){
+      counter++;
+    });
+
   }
 
   void _back() {
