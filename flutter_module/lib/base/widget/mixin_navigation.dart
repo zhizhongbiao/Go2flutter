@@ -14,3 +14,8 @@ mixin MixinNavigation {
     );
   }
 }
+
+
+class GoRouterManager{
+
+}
