@@ -1,10 +1,13 @@
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_module/ui/network/dio_manager.dart';
+import 'package:flutter_module/ui/network/repository.dart';
 import 'package:flutter_module/ui/riverpod/providers/counter_provider.dart';
 import 'package:flutter_module/ui/riverpod/providers/post_provider.dart';
 import 'package:flutter_module/ui/riverpod/providers/provider_string.dart';
 import 'package:flutter_module/ui/riverpod/providers/user_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'network/base_url_notifier.dart';
 
 class PageRiverpod extends ConsumerWidget {
   @override
@@ -15,10 +18,14 @@ class PageRiverpod extends ConsumerWidget {
 
     final str = ref.watch(providerStringProvider);
 
+    final myRepos= ref.watch(myRepository);
+
     final countNotifier = ref.read(counterProvider.notifier);
 
     final strNotifier = ref.read(providerStringProvider.notifier);
     final userNotifier = ref.read(userProvider.notifier);
+
+    final baseUrlNotifier = ref.read(baseUrlProvider.notifier);
 
     return Scaffold(
       appBar: AppBar(title: const Text("Riverpod 3.x Counter")),
@@ -27,6 +34,7 @@ class PageRiverpod extends ConsumerWidget {
         countNotifier,
         strNotifier,
         userNotifier,
+        baseUrlNotifier,
       ),
     );
   }
@@ -60,6 +68,7 @@ class PageRiverpod extends ConsumerWidget {
     Counter countNotifier,
     ProviderString strNotifier,
     UserNotifier userNotifier,
+    BaseUrlNotifier baseUrlNotifier,
   ) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
@@ -83,7 +92,8 @@ class PageRiverpod extends ConsumerWidget {
 
         const SizedBox(width: 20),
         FloatingActionButton(
-          onPressed: userNotifier.refresh,
+          // onPressed: userNotifier.refresh,
+          onPressed: baseUrlNotifier.change,
           child: Text("refresh"),
         ),
       ],
