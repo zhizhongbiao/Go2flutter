@@ -1,6 +1,7 @@
 
 import 'package:dio/dio.dart';
 import 'package:flutter_module/ui/riverpod/providers/user_provider.dart';
+import 'package:json_annotation/json_annotation.dart';
 import 'package:retrofit/http.dart';
 
 import '../constructor/constructor.dart';
@@ -22,6 +23,20 @@ abstract class ApiService {
 }
 
 
-class LoginRequest{}
-class LoginResponse{}
+
+@JsonSerializable()
+class LoginRequest{
+  LoginRequest();
+  factory LoginRequest.fromJson(Map<String, dynamic> json) => _$LoginRequestFromJson(json);
+  Map<String, dynamic> toJson() => _$LoginRequestToJson(this);
+}
+
+@JsonSerializable()
+class LoginResponse{
+  LoginResponse();
+
+  factory LoginResponse.fromJson(Map<String, dynamic> json) => _$LoginResponseFromJson(json);
+  Map<String, dynamic> toJson() => _$LoginResponseToJson(this);
+
+}
 
