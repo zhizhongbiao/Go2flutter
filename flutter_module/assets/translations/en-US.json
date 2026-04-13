@@ -1,0 +1,8 @@
+{
+  "title": "My App",
+  "welcome": "Welcome, {}!",
+  "gender": {
+    "male": "He",
+    "female": "She"
+  }
+}

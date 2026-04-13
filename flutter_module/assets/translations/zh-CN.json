@@ -1,0 +1,8 @@
+{
+  "title": "我的应用",
+  "welcome": "欢迎，{}！",
+  "gender": {
+    "male": "他",
+    "female": "她"
+  }
+}
