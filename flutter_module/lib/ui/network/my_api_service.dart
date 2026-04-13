@@ -3,6 +3,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_module/ui/constructor/constructor.dart';
 import 'package:flutter_module/ui/network/dio_manager.dart';
+import 'package:flutter_module/ui/network/parse_error_logger.dart';
 import 'package:flutter_module/ui/network/repository.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:retrofit/http.dart';

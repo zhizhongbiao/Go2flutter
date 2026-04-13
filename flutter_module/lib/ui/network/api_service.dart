@@ -1,5 +1,6 @@
 
 import 'package:dio/dio.dart';
+import 'package:flutter_module/ui/network/parse_error_logger.dart';
 import 'package:flutter_module/ui/riverpod/providers/user_provider.dart';
 import 'package:json_annotation/json_annotation.dart';
 import 'package:retrofit/http.dart';
