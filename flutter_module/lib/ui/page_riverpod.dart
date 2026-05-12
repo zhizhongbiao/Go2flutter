@@ -10,6 +10,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'network/base_url_notifier.dart';
 
 class PageRiverpod extends ConsumerWidget {
+  const PageRiverpod({super.key});
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final count = ref.watch(counterProvider);
