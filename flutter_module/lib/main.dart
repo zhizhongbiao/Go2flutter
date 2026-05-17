@@ -1,23 +1,24 @@
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_module/base/channels/channel_manger.dart';
+import 'package:flutter_module/ui/map/MapLibreExample.dart';
+import 'package:flutter_module/ui/map/claude/screens/lawn_map_screen.dart';
 import 'package:flutter_module/ui/my_stateful_page.dart';
 import 'package:flutter_module/ui/page_riverpod.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-void main(){
-
-  init();
-  runApp(EasyLocalization(
-    supportedLocales: const [Locale('en', 'US'), Locale('zh', 'CN')],
-    path: 'assets/translations', // 资源路径
-    fallbackLocale: const Locale('en', 'US'), // 兜底语言
-    child: const ProviderScope(child:MyApp()),
-  ));
-}
-
-void init() async{
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   await EasyLocalization.ensureInitialized();
+  runApp(
+    EasyLocalization(
+      supportedLocales: const [Locale('en', 'US'), Locale('zh', 'CN')],
+      path: 'assets/translations', // 资源路径
+      fallbackLocale: const Locale('en', 'US'), // 兜底语言
+      child: const ProviderScope(child: MyApp()),
+    ),
+  );
+
 }
 
 class MyApp extends StatelessWidget {
@@ -28,12 +29,12 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     ChannelManger.instance.initChanel();
     return MaterialApp(
-
       // 2. 注入配置
       localizationsDelegates: context.localizationDelegates,
       supportedLocales: context.supportedLocales,
-      locale: context.locale, // 关键：跟随 EasyLocalization 的状态
+      locale: context.locale,
 
+      // 关键：跟随 EasyLocalization 的状态
       title: 'Flutter Demo',
       theme: ThemeData(
         // This is the theme of your application.
@@ -48,8 +49,8 @@ class MyApp extends StatelessWidget {
       ),
       home: const MyHomePage(title: 'Flutter Demo Home Page'),
       routes: {
-        "/myPage":(context)=> MyStatefulPage(),
-        "/riverpod":(context)=> PageRiverpod()
+        "/myPage": (context) => MyStatefulPage(),
+        "/riverpod": (context) => PageRiverpod(),
       },
     );
   }
@@ -101,33 +102,31 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
   }
 
-
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // TODO: implement didChangeAppLifecycleState
     super.didChangeAppLifecycleState(state);
     switch (state) {
-      case AppLifecycleState.resumed:      // App 回到前台
+      case AppLifecycleState.resumed: // App 回到前台
         print('App resumed（前台）');
         break;
-      case AppLifecycleState.inactive:     // App 处于非活跃状态（切换应用、接电话等）
+      case AppLifecycleState.inactive: // App 处于非活跃状态（切换应用、接电话等）
         print('App inactive');
         break;
-      case AppLifecycleState.paused:       // App 进入后台
+      case AppLifecycleState.paused: // App 进入后台
         print('App paused（后台）');
         break;
-      case AppLifecycleState.detached:     // App 被系统杀死或分离
+      case AppLifecycleState.detached: // App 被系统杀死或分离
         print('App detached');
         break;
-      case AppLifecycleState.hidden:       // Flutter 3.7+ 新增（完全隐藏）
+      case AppLifecycleState.hidden: // Flutter 3.7+ 新增（完全隐藏）
         print('App hidden');
         break;
     }
   }
 
-
-  void _go2MyPage(){
-    ChannelManger.instance.invokeMethod("method", {});
+  void _go2MyPage() {
+    // ChannelManger.instance.invokeMethod("method", {});
     // Navigator.of(context).push(MaterialPageRoute(builder: (context)=>const MyStatefulPage()));
   }
 
@@ -181,3 +180,52 @@ class _MyHomePageState extends State<MyHomePage> with WidgetsBindingObserver {
     );
   }
 }
+
+
+
+// import 'package:flutter/material.dart';
+// import 'package:flutter/services.dart';
+
+
+// void main() {
+//   WidgetsFlutterBinding.ensureInitialized();
+//
+//   // Lock to portrait – point cloud map is designed for vertical layout.
+//   // Remove if you want landscape support.
+//   SystemChrome.setPreferredOrientations([
+//     DeviceOrientation.portraitUp,
+//     DeviceOrientation.landscapeLeft,
+//     DeviceOrientation.landscapeRight,
+//   ]);
+//
+//   // Full-screen immersive for maximum map area
+//   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+//     statusBarColor:         Colors.transparent,
+//     statusBarBrightness:    Brightness.dark,
+//     statusBarIconBrightness: Brightness.light,
+//   ));
+//
+//   runApp(const LawnMapApp());
+// }
+//
+// class LawnMapApp extends StatelessWidget {
+//   const LawnMapApp({super.key});
+//
+//   @override
+//   Widget build(BuildContext context) {
+//     return MaterialApp(
+//       title: 'LiDAR Point Cloud Map',
+//       debugShowCheckedModeBanner: false,
+//       theme: ThemeData(
+//         colorScheme: const ColorScheme.dark(
+//           primary:   Color(0xff1db954),
+//           secondary: Color(0xff52d46e),
+//           surface:   Color(0xff0d1a0e),
+//         ),
+//         scaffoldBackgroundColor: const Color(0xff080f09),
+//         useMaterial3: true,
+//       ),
+//       home: const LawnMapScreen(),
+//     );
+//   }
+// }

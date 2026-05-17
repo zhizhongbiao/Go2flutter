@@ -39,6 +39,10 @@ dependencies:
   permission_handler: ^11.3.1
   shared_preferences: ^2.3.2
 
+  maplibre_gl: ^0.26.0
+  # Write large GeoJSON to temp file (avoids passing huge strings through Platform Channel)
+  path_provider: ^2.1.2
+
   flutter_localizations: # 官方国际化包
     sdk: flutter
   intl: ^0.20.2 # 国际化工具类

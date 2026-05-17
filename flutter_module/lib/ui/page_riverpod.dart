@@ -7,6 +7,11 @@ import 'package:flutter_module/ui/riverpod/providers/provider_string.dart';
 import 'package:flutter_module/ui/riverpod/providers/user_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'map/LidarColorMap.dart';
+import 'map/LidarExtremeMap.dart';
+import 'map/LidarHighPerfMap.dart';
+import 'map/LidarHighPerformanceMap.dart';
+import 'map/MapLibreExample.dart';
 import 'network/base_url_notifier.dart';
 
 class PageRiverpod extends ConsumerWidget {
@@ -20,7 +25,7 @@ class PageRiverpod extends ConsumerWidget {
 
     final str = ref.watch(providerStringProvider);
 
-    final myRepos= ref.watch(myRepository);
+    final myRepos = ref.watch(myRepository);
 
     final countNotifier = ref.read(counterProvider.notifier);
 
@@ -33,6 +38,7 @@ class PageRiverpod extends ConsumerWidget {
       appBar: AppBar(title: const Text("Riverpod 3.x Counter")),
       body: _buildCenterColumn(count, str, userAsync, postAsync),
       floatingActionButton: _buildButtonRow(
+        context,
         countNotifier,
         strNotifier,
         userNotifier,
@@ -66,39 +72,56 @@ class PageRiverpod extends ConsumerWidget {
     );
   }
 
-  Row _buildButtonRow(
+  Wrap _buildButtonRow(
+    BuildContext context,
     Counter countNotifier,
     ProviderString strNotifier,
     UserNotifier userNotifier,
     BaseUrlNotifier baseUrlNotifier,
   ) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
+    return Wrap(
+      spacing: 1.0, // 子组件之间的水平间距 (类似 Android 的 horizontalGap)
+      runSpacing: 4.0, // 行与行之间的垂直间距 (类似 Android 的 verticalGap)
+      alignment: WrapAlignment.center, // 主轴方向的对齐方式
+      children: <Widget>[
         FloatingActionButton(
           onPressed: countNotifier.decrement,
           child: Icon(Icons.remove),
         ),
-        const SizedBox(width: 20),
+        const SizedBox(width: 10),
         FloatingActionButton(
           onPressed: countNotifier.increment,
           child: Icon(Icons.add),
         ),
-        const SizedBox(width: 20),
+        const SizedBox(width: 10),
         FloatingActionButton(onPressed: strNotifier.fuck, child: Text("fuck")),
-        const SizedBox(width: 20),
+        const SizedBox(width: 10),
         FloatingActionButton(
           onPressed: strNotifier.screw,
           child: Text("screw"),
         ),
 
-        const SizedBox(width: 20),
+        const SizedBox(width: 10),
         FloatingActionButton(
           // onPressed: userNotifier.refresh,
           onPressed: baseUrlNotifier.change,
           child: Text("refresh"),
         ),
+
+        const SizedBox(width: 10),
+        FloatingActionButton(
+          // onPressed: userNotifier.refresh,
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (context) => const PointCloudMapPage(),
+              ),
+            );
+          },
+          child: Text("mapbox"),
+        ),
       ],
     );
   }
+
 }
