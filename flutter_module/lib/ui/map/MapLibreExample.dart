@@ -31,7 +31,7 @@ class _PointCloudMapPageState extends State<PointCloudMapPage> {
   void initState() {
     super.initState();
     _initFeaturePool();
-    _addInitialChunk(80000);        // 初始8万点
+    _addInitialChunk(180000);        // 初始8万点
     _startSimulation();
   }
 

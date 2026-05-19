@@ -7,12 +7,8 @@ import 'package:flutter_module/ui/riverpod/providers/provider_string.dart';
 import 'package:flutter_module/ui/riverpod/providers/user_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'map/LidarColorMap.dart';
-import 'map/LidarExtremeMap.dart';
-import 'map/LidarHighPerfMap.dart';
-import 'map/LidarHighPerformanceMap.dart';
-import 'map/MapLibreExample.dart';
-import 'map/fluttermap/PureFlutterLidarPage.dart';
+import 'map/LawnMowerMapPage.dart';
+
 import 'network/base_url_notifier.dart';
 
 class PageRiverpod extends ConsumerWidget {
@@ -115,7 +111,7 @@ class PageRiverpod extends ConsumerWidget {
           onPressed: () {
             Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (context) => const PointCloudMapPage(),
+                builder: (context) => const LawnMowerMapPage(),
               ),
             );
           },

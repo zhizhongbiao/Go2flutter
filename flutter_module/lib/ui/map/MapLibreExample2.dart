@@ -1,351 +1,460 @@
-import 'dart:convert';
+import 'dart:async';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'constants.dart';
 
-// ============================================================================
-// 文件说明（中文注释）
-// 这个示例展示了如何在 Flutter 中使用两个独立的 Isolate 来生成并加载
-// 大量点云数据到 MapLibre 地图，避免主线程（UI）被 json 编解码和数据生成
-// 的 CPU 密集型任务阻塞。
+// ═══════════════════════════════════════════════════════════════════════════
+// 设计思路对比
 //
-// 流程概览：
-// 1) Isolate A（顶层函数 _generateIsolateEntry）负责生成模拟点云并将其
-//    直接序列化为 GeoJSON 字符串（String），然后通过 SendPort 发回主线程。
-//    优点：在子线程里完成生成与序列化，主线程不分配大量临时对象，降低峰值
-//    内存与卡顿风险。字符串采用紧凑 JSON（简短 key），并用 StringBuffer 拼接
-//    以提高性能。
-// 2) Isolate B（由 compute() 启动，函数为 _decodeGeoJson）负责将上一步得到的
-//    GeoJSON 字符串 decode 成 Map。compute 提供了方便的 Isolate 封装，函数必
-//    顶层且可序列化。
-// 3) 主线程接收 Map（已完成解析），将其提供给 maplibre_gl 插件：首次添加
-//    GeoJSON source + CircleLayer，或在地图已存在时热替换数据源。
+// ❌ 旧方案（有 IO 压力）：
+//    维护一个"全量大文件"，每次追加都：
+//      读旧文件（线性增长）→ 写新文件（线性增长）
+//    30分钟后：读写各 150MB，手机 IO 撑不住
 //
-// 设计要点：
-// - 将生成、序列化、解析等 CPU 密集型任务都放到子线程，主线程只做最小量
-//   的状态切换和 Map 操作回调，确保 UI 流畅。
-// - 使用 data-driven style（根据 feature.properties.i 驱动 circleColor）把
-//   颜色和大小的计算交给 GPU（MapLibre 着色器），避免 Dart 层逐点处理。
-// - 支持两种热替换策略：尝试使用 setGeoJsonSource（更高效），若插件/版本不
-//   支持则 fallback 到移除并重建 layer/source。
-// ============================================================================
+// ✅ 新方案（恒定 IO）：
+//    每批数据 → 独立小文件（写一次，永不修改）
+//    MapLibre 叠加多个 Source 显示所有历史数据
+//    每次增量 IO = 当前批次大小（固定 ~1MB，与历史总量无关）
+//    10个小文件自动合并成1个，防止 Source 数量无限增长
+//
+// 文件结构示意：
+//   lidar_chunk_0.geojson  ← 初始8万点，写完永不读写
+//   lidar_chunk_1.geojson  ← 增量6000点
+//   lidar_chunk_2.geojson  ← 增量6000点
+//   ...（超过10个时自动合并）
+// ═══════════════════════════════════════════════════════════════════════════
 
-class _IsolateArgs {
+// ─── Isolate 消息类（顶层，可跨 Isolate 传递）────────────────────────────
+
+class _GenArgs {
   final SendPort sendPort;
   final int count;
   final double centerLat;
   final double centerLon;
-
-  const _IsolateArgs({
+  final String filePath;
+  const _GenArgs({
     required this.sendPort,
     required this.count,
     required this.centerLat,
     required this.centerLon,
+    required this.filePath,
   });
 }
 
-/// Isolate A 入口函数：在独立线程中生成点云并直接序列化为 GeoJSON 字符串。
-///
-/// 说明：此函数在调用方通过 Isolate.spawn 启动的子 isolate 中运行。它不会与
-/// Flutter 主线程共享内存，而是通过 SendPort 将最终的字符串发送回主线程。
-///
-/// 实现关键点：
-/// - 使用 StringBuffer 拼接 JSON 文本，避免创建大量临时 Map/List 对象，降低
-///   GC 与内存峰值。
-/// - properties 使用紧凑 key（"i"）并把 intensity 格式化为三位小数字符串，便
-///   于后续在 MapLibre 的表达式中直接读取并用于着色（GPU 侧处理）。
-void _generateIsolateEntry(_IsolateArgs args) {
-  final rng = Random();
-  final sb = StringBuffer();
+class _WriteArgs {
+  final SendPort sendPort;
+  final Float32List chunk;
+  final String filePath;
+  const _WriteArgs({
+    required this.sendPort,
+    required this.chunk,
+    required this.filePath,
+  });
+}
 
-  sb.write('{"type":"FeatureCollection","features":[');
+class _MergeArgs {
+  final SendPort sendPort;
+  final List<String> inputPaths;
+  final String outputPath;
+  const _MergeArgs({
+    required this.sendPort,
+    required this.inputPaths,
+    required this.outputPath,
+  });
+}
+
+// ─── Isolate 顶层函数 ─────────────────────────────────────────────────────
+
+/// 随机生成点云并写入文件（初始批次）
+void _generateChunkIsolate(_GenArgs args) {
+  final rng  = Random();
+  final sink = File(args.filePath).openSync(mode: FileMode.write);
+  sink.writeStringSync('{"type":"FeatureCollection","features":[');
 
   for (int i = 0; i < args.count; i++) {
-    final latOffset = (rng.nextDouble() - 0.5) * 0.003;
-    final lonOffset = (rng.nextDouble() - 0.5) * 0.003;
-    final lat = args.centerLat + latOffset;
-    final lon = args.centerLon + lonOffset;
-
-    // intensity 归一化到 0.000–1.000，方便 MapLibre 表达式直接使用
-    final intensity = rng.nextDouble();
-
-    if (i > 0) sb.write(',');
-
-    // 紧凑格式：短 key "i" 减少字符串体积约 40%
-    sb.write(
-      '{"type":"Feature",'
-          '"geometry":{"type":"Point","coordinates":[$lon,$lat]},'
-          '"properties":{"i":${intensity.toStringAsFixed(3)}}}',
-    );
-
-    // 每 2 万条刷一次 StringBuffer，避免单次分配内存过大
-    if (i % 20000 == 19999) {
-      // StringBuffer 无法中途 flush 到文件，这里只是注释说明分批意识
-      // 如需写文件可改为 IOSink，此处保持内存方式
-    }
+    final lon = args.centerLon + (rng.nextDouble() - 0.5) * 0.012;
+    final lat = args.centerLat + (rng.nextDouble() - 0.5) * 0.012;
+    final iv  = rng.nextDouble();
+    if (i > 0) sink.writeStringSync(',');
+    sink.writeStringSync(_feat(lon, lat, iv));
   }
 
-  sb.write(']}');
-  args.sendPort.send(sb.toString());
+  sink.writeStringSync(']}');
+  sink.flushSync();
+  sink.closeSync();
+  args.sendPort.send('file://${args.filePath}');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// compute() 函数：在 Isolate B 里 jsonDecode String → Map
-// 必须是顶层函数（不能是闭包），compute() 要求可序列化
-// ═══════════════════════════════════════════════════════════════════════════════
+/// 把 Float32List 写入文件（增量批次）
+/// IO量 = 当前批次大小，与历史总量完全无关
+void _writeChunkIsolate(_WriteArgs args) {
+  final chunk      = args.chunk;
+  final pointCount = chunk.length ~/ 3;
+  final sink       = File(args.filePath).openSync(mode: FileMode.write);
+  sink.writeStringSync('{"type":"FeatureCollection","features":[');
 
-/// Isolate B（用于 compute）：在后台线程将 GeoJSON 字符串解析为 Map。
-///
-/// 注意：compute() 要求传入的函数为顶层或静态函数且参数/返回值可序列化。
-/// 把 jsonDecode 放入 compute 可以避免主线程在解析大型 JSON 字符串时卡顿。
-Map<String, dynamic> _decodeGeoJson(String jsonStr) {
-  return jsonDecode(jsonStr) as Map<String, dynamic>;
+  for (int i = 0; i < pointCount; i++) {
+    final lon = chunk[i * 3];
+    final lat = chunk[i * 3 + 1];
+    final iv  = chunk[i * 3 + 2];
+    if (i > 0) sink.writeStringSync(',');
+    sink.writeStringSync(_feat(lon, lat, iv));
+  }
+
+  sink.writeStringSync(']}');
+  sink.flushSync();
+  sink.closeSync();
+  args.sendPort.send('file://${args.filePath}');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 主 Widget
-// ═══════════════════════════════════════════════════════════════════════════════
+/// 合并多个小 GeoJSON 文件为一个（不解析 JSON，直接字符串拼接）
+/// 只在触发合并时执行一次，合并后小文件删除
+void _mergeFilesIsolate(_MergeArgs args) {
+  final sink = File(args.outputPath).openSync(mode: FileMode.write);
+  sink.writeStringSync('{"type":"FeatureCollection","features":[');
 
-/// 页面控件：显示 MapLibre 地图并承载点云数据加载/更新逻辑。
-///
-/// 行为摘要：
-/// - initState 中启动点云生成/加载管线（_runFullPipeline），与地图异步初始化并行。
-/// - 当地图样式（style）加载完成时，会尝试把已准备好的 GeoJSON 数据注入地图；
-///   若数据尚未准备好，则会在生成完成后由 _runFullPipeline 检测 controller 并推送。
+  bool firstFeature = true;
+  for (final path in args.inputPaths) {
+    final content = File(path).readAsStringSync();
+    // 固定格式：{"type":"FeatureCollection","features":[...]}
+    // 直接提取方括号内的内容，避免 JSON 解析开销
+    final start    = content.indexOf('[') + 1;
+    final end      = content.lastIndexOf(']');
+    if (start >= end) continue;
+    final inner    = content.substring(start, end).trim();
+    if (inner.isEmpty) continue;
+    if (!firstFeature) sink.writeStringSync(',');
+    sink.writeStringSync(inner);
+    firstFeature = false;
+  }
+
+  sink.writeStringSync(']}');
+  sink.flushSync();
+  sink.closeSync();
+  args.sendPort.send('file://${args.outputPath}');
+}
+
+String _feat(double lon, double lat, double iv) =>
+    '{"type":"Feature",'
+        '"geometry":{"type":"Point","coordinates":[${lon.toStringAsFixed(6)},${lat.toStringAsFixed(6)}]},'
+        '"properties":{"i":${iv.toStringAsFixed(3)}}}';
+
+// ─── 记录每个已添加到地图的 Chunk ────────────────────────────────────────
+
+class _ChunkMeta {
+  final String sourceId;
+  final String layerId;
+  final String fileUri;
+  final int    pointCount;
+  const _ChunkMeta({
+    required this.sourceId,
+    required this.layerId,
+    required this.fileUri,
+    required this.pointCount,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 主页面
+// ═══════════════════════════════════════════════════════════════════════════
+
 class PointCloudMapPage extends StatefulWidget {
   const PointCloudMapPage({super.key});
-
   @override
   State<PointCloudMapPage> createState() => _PointCloudMapPageState();
 }
 
 class _PointCloudMapPageState extends State<PointCloudMapPage> {
-  // MapLibre 控制器对象，地图创建后由 _onMapCreated 注入。
   MapLibreMapController? _controller;
 
-  // 标识：是否已经在地图上添加了我们的 source + layer（用于更新流程判断）
-  bool _layerAdded = false;
+  bool    _mapReady        = false;
+  bool    _pipelineRunning = false;
+  int     _totalPoints     = 0;
+  int     _chunkIdx        = 0;   // 递增 ID，保证 source/layer ID 唯一
+  String? _tempDir;
 
-  // 是否正在生成/解析数据（用于在 AppBar 上显示进度）
-  bool _loading = false;
+  final List<_ChunkMeta> _addedChunks   = []; // 已在地图上的 chunk
+  final List<_ChunkMeta> _pendingChunks = []; // 地图未 ready 时暂存
 
-  // 当前点数（仅用于 UI 展示），不直接影响渲染逻辑
-  int _pointCount = 0;
+  // 合并阈值：超过此数量触发合并
+  static const _mergeThreshold = 10;
+  // 每次合并的 chunk 数量
+  static const _mergeCount     = 8;
 
-  // 当数据在后台线程生成完毕，但地图样式尚未 ready 时，将解析后的 Map 暂存到此处。
-  // 当样式加载完成后（onStyleLoaded），会检查此字段并立即渲染。
-  Map<String, dynamic>? _pendingGeoJsonMap;
+  Timer? _simulationTimer;
 
-  // 统一使用固定的 source 与 layer id，便于后续热替换或移除
-  static const _sourceId = 'pointCloudSource';
-  static const _layerId = 'pointCloudLayer';
-
-  // ── 生命周期 ──────────────────────────────────────────────────────────────
+  // ── 生命周期 ─────────────────────────────────────────────────────────────
 
   @override
   void initState() {
     super.initState();
-    // 启动时立即开始生成数据，和地图初始化并行进行
-    _runFullPipeline(count: 80000);
+    _init();
   }
 
   @override
   void dispose() {
+    _simulationTimer?.cancel();
     _controller?.dispose();
+    _cleanupFiles();
     super.dispose();
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // 完整 Pipeline：Isolate A(生成+序列化) → Isolate B(反序列化) → MapLibre
-  // UI 线程全程只负责等待回调，不做任何 CPU 密集操作
-  //
-  // _runFullPipeline 会执行下面的步骤：
-  // 1) 在新的 isolate（Isolate A）里调用 _generateIsolateEntry，生成 GeoJSON 字符串；
-  // 2) 使用 compute() 在另一个 isolate（Isolate B）中将字符串解析为 Map；
-  // 3) 若地图控制器已准备好，则将解析后的 Map 注入到 maplibre（首次添加或热替换）；
-  //
-  // 方法会维护一个 _loading 标志以避免并发运行；在方法早期会检查 mounted
-  // 并在每一步完成后再次检查，以防 Widget 已被销毁。
-  // ═══════════════════════════════════════════════════════════════════════════
+  Future<void> _init() async {
+    _tempDir = (await getTemporaryDirectory()).path;
+    await _addChunk(isInitial: true, count: 80000);
+  }
 
-  Future<void> _runFullPipeline({required int count}) async {
-    if (_loading) return;
+  // ── 路径 / ID 生成 ────────────────────────────────────────────────────────
 
-    setState(() {
-      _loading = true;
-      _pendingGeoJsonMap = null;
-    });
+  String _filePath(int idx)   => '$_tempDir/lidar_chunk_$idx.geojson';
+  String _sourceId(int idx)   => 'lidar_src_$idx';
+  String _layerId(int idx)    => 'lidar_lyr_$idx';
 
-    // ── Step 1: Isolate A —— 生成点云 + 序列化为 GeoJSON 字符串 ──────────
-    debugPrint('⏳ [Step1] 开始生成 $count 个点云...');
-    final t1 = DateTime.now();
+  // ═══════════════════════════════════════════════════════════════════════
+  // 核心：添加一批点（初始 or 增量）
+  // ═══════════════════════════════════════════════════════════════════════
 
-    final rp = ReceivePort();
-    await Isolate.spawn(
-      _generateIsolateEntry,
-      _IsolateArgs(
-        sendPort: rp.sendPort,
-        count: count,
-        centerLat: latLon.latitude,
-        centerLon: latLon.longitude,
+  Future<void> _addChunk({required bool isInitial, required int count}) async {
+    if (_tempDir == null) return;
+    if (!isInitial && _pipelineRunning) return;
+
+    _pipelineRunning = true;
+    if (mounted) setState(() {});
+
+    try {
+      final idx  = _chunkIdx++;
+      final path = _filePath(idx);
+      final rp   = ReceivePort();
+
+      if (isInitial) {
+        // 初始批次：Isolate 随机生成 + 写文件
+        await Isolate.spawn(_generateChunkIsolate, _GenArgs(
+          sendPort:  rp.sendPort,
+          count:     count,
+          centerLat: latLon.latitude,
+          centerLon: latLon.longitude,
+          filePath:  path,
+        ));
+      } else {
+        // 增量批次：主线程生成 Float32List（6000点 < 1ms），Isolate 写文件
+        final chunk = _buildFloat32Chunk(count);
+        await Isolate.spawn(_writeChunkIsolate, _WriteArgs(
+          sendPort: rp.sendPort,
+          chunk:    chunk,
+          filePath: path,
+        ));
+      }
+
+      final fileUri = await rp.first as String;
+      rp.close();
+
+      _totalPoints += count;
+      final meta = _ChunkMeta(
+        sourceId:   _sourceId(idx),
+        layerId:    _layerId(idx),
+        fileUri:    fileUri,
+        pointCount: count,
+      );
+
+      if (_mapReady && _controller != null) {
+        await _attachToMap(meta);
+        // 超过阈值时触发合并（在后台异步执行，不阻塞当前帧）
+        if (_addedChunks.length >= _mergeThreshold) {
+          _mergeOldChunksAsync();
+        }
+      } else {
+        _pendingChunks.add(meta);
+      }
+
+    } finally {
+      _pipelineRunning = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// 快速生成 Float32List（主线程可接受，6000点 < 1ms）
+  Float32List _buildFloat32Chunk(int count) {
+    final rng  = Random();
+    final data = Float32List(count * 3);
+    final cLat = latLon.latitude;
+    final cLon = latLon.longitude;
+    for (int i = 0; i < count; i++) {
+      final base     = i * 3;
+      data[base]     = cLon + (rng.nextDouble() - 0.5) * 0.012;
+      data[base + 1] = cLat + (rng.nextDouble() - 0.5) * 0.012;
+      data[base + 2] = rng.nextDouble();
+    }
+    return data;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 添加 Source + Layer 到地图
+  // 每次只传一个短 URI 字符串给 Platform Channel，零序列化开销
+  // ═══════════════════════════════════════════════════════════════════════
+
+  Future<void> _attachToMap(_ChunkMeta meta) async {
+    final c = _controller;
+    if (c == null) return;
+
+    await c.addSource(
+      meta.sourceId,
+      GeojsonSourceProperties(
+        data:           meta.fileUri, // file:// 路径，Native 侧读文件，不经过 Dart
+        maxzoom:        18,
+        buffer:         64,
+        tolerance:      0.5,
+        cluster:        true,
+        clusterMaxZoom: 15,
+        clusterRadius:  40,
       ),
     );
-    final geoJsonString = await rp.first as String;
+
+    // 聚合圆（远景）
+    await c.addCircleLayer(
+      meta.sourceId,
+      '${meta.layerId}_cls',
+      CircleLayerProperties(
+        circleRadius: ['step', ['get', 'point_count'], 12, 200, 20, 2000, 28],
+        circleColor:  ['step', ['get', 'point_count'],
+          '#1a6b2e', 200, '#2db352', 2000, '#52d46e'],
+        circleOpacity:       0.72,
+        circleStrokeWidth:   1.0,
+        circleStrokeColor:   '#ffffff',
+        circleStrokeOpacity: 0.18,
+      ),
+      filter: ['has', 'point_count'],
+    );
+
+    // 单点圆（近景，颜色/大小 GPU data-driven）
+    await c.addCircleLayer(
+      meta.sourceId,
+      meta.layerId,
+      CircleLayerProperties(
+        circleRadius: [
+          'interpolate', ['linear'], ['zoom'],
+          15, 1.5,  18, 3.0,  20, 7.0,
+        ],
+        circleColor: [
+          'interpolate', ['linear'], ['get', 'i'],
+          0.0, '#00ff88',
+          0.5, '#ffdd00',
+          1.0, '#ff2200',
+        ],
+        circleOpacity: 0.85,
+        circleBlur:    0.1,
+      ),
+      filter: ['!', ['has', 'point_count']],
+    );
+
+    _addedChunks.add(meta);
+    debugPrint('✅ chunk ${meta.sourceId} 已添加，当前 source 数: ${_addedChunks.length}');
+    if (mounted) setState(() {});
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 自动合并：防止 Source 数量无限增长
+  //
+  // IO 分析：
+  //   合并 8 个 6000点的文件 ≈ 读 8×1MB + 写 1×8MB = 16MB（一次性，可接受）
+  //   合并后删除 8 个旧文件，磁盘空间不累积
+  //   触发频率：每新增 10 个 chunk 触发一次（约每 50 秒一次）
+  // ═══════════════════════════════════════════════════════════════════════
+
+  Future<void> _mergeOldChunksAsync() async {
+    if (_addedChunks.length < _mergeCount) return;
+    final c = _controller;
+    if (c == null) return;
+
+    final toMerge    = _addedChunks.take(_mergeCount).toList();
+    final mergedIdx  = _chunkIdx++;
+    final mergedPath = _filePath(mergedIdx);
+
+    debugPrint('🔄 合并 $_mergeCount 个旧 chunk...');
+
+    // Isolate 里合并文件（字符串拼接，不解析 JSON）
+    final rp = ReceivePort();
+    await Isolate.spawn(_mergeFilesIsolate, _MergeArgs(
+      sendPort:   rp.sendPort,
+      inputPaths: toMerge.map((m) => m.fileUri.replaceFirst('file://', '')).toList(),
+      outputPath: mergedPath,
+    ));
+    final mergedUri = await rp.first as String;
     rp.close();
 
-    final ms1 = DateTime.now().difference(t1).inMilliseconds;
-    debugPrint('✅ [Step1] 生成完成，耗时 ${ms1}ms，字符串大小: ${(geoJsonString.length / 1024).toStringAsFixed(1)} KB');
-
-    if (!mounted) return;
-
-    // ── Step 2: Isolate B —— jsonDecode String → Map（compute 语法糖）────
-    debugPrint('⏳ [Step2] 开始 jsonDecode...');
-    final t2 = DateTime.now();
-
-    // compute() 是 Flutter 官方封装的 Isolate，函数必须是顶层函数
-    final geoJsonMap = await compute(_decodeGeoJson, geoJsonString);
-
-    final ms2 = DateTime.now().difference(t2).inMilliseconds;
-    debugPrint('✅ [Step2] jsonDecode 完成，耗时 ${ms2}ms');
-
-    if (!mounted) return;
-
-    _pointCount = count;
-    _pendingGeoJsonMap = geoJsonMap;
-
-    // ── Step 3: 推送到 MapLibre ───────────────────────────────────────────
-    if (_controller != null) {
-      if (_layerAdded) {
-        // 地图已有 layer → 热替换数据源，不重建 layer
-        await _updateSource(geoJsonMap);
-      } else {
-        // 地图已 ready 但还没建 layer → 直接建
-        await _addLayerFirstTime(geoJsonMap);
+    // 从地图移除旧 layer/source，删除旧文件
+    for (final old in toMerge) {
+      try {
+        await c.removeLayer(old.layerId);
+        await c.removeLayer('${old.layerId}_cls');
+        await c.removeSource(old.sourceId);
+        File(old.fileUri.replaceFirst('file://', '')).deleteSync();
+      } catch (e) {
+        debugPrint('⚠️ 移除旧 chunk 失败: $e');
       }
     }
-    // 若 _controller == null：地图还没 ready，等 _onStyleLoaded 触发
+    _addedChunks.removeRange(0, _mergeCount);
 
-    if (mounted) {
-      setState(() => _loading = false);
-    }
+    // 添加合并后的大文件
+    final mergedMeta = _ChunkMeta(
+      sourceId:   _sourceId(mergedIdx),
+      layerId:    _layerId(mergedIdx),
+      fileUri:    mergedUri,
+      pointCount: toMerge.fold(0, (s, m) => s + m.pointCount),
+    );
+    // 插到头部（时间最早）
+    await _attachToMap(mergedMeta);
+    _addedChunks.remove(mergedMeta);
+    _addedChunks.insert(0, mergedMeta);
+
+    debugPrint('✅ 合并完成，当前 source 数: ${_addedChunks.length}');
   }
 
   // ── MapLibre 回调 ────────────────────────────────────────────────────────
 
-  /// Map 创建回调：保存 controller 引用以便后续与地图交互。
-  /// 注意：controller 只在地图创建后可用，因此在数据准备好但地图未创建时
-  /// 会先将解析后的 Map 存入 _pendingGeoJsonMap，等待样式加载后再渲染。
   void _onMapCreated(MapLibreMapController c) {
     _controller = c;
-    debugPrint('🗺️ MapLibre 控制器已创建');
   }
 
-  /// 当地图样式加载完成时触发：如果后台数据已经准备好，则立即把 GeoJSON 注入地图。
-  ///
-  /// 这里需要区分两种情况：
-  /// - 数据已准备好（_pendingGeoJsonMap != null）：直接调用 _addLayerFirstTime 渲染；
-  /// - 数据尚未准备：等待 _runFullPipeline 在完成时检测到 controller != null 并推送。
   Future<void> _onStyleLoaded() async {
-    debugPrint('🗺️ Style 加载完成');
-    final map = _pendingGeoJsonMap;
-    if (map != null) {
-      // 数据已经准备好，直接渲染
-      await _addLayerFirstTime(map);
-      if (mounted) setState(() => _loading = false);
+    _mapReady = true;
+    // 把 pending 队列里所有 chunk 添加到地图
+    for (final meta in _pendingChunks) {
+      await _attachToMap(meta);
     }
-    // 若数据还没好（Isolate 还在跑），_runFullPipeline 完成后会判断 controller != null 再推送
-  }
-
-  // ── Layer 管理 ────────────────────────────────────────────────────────────
-
-  /// 首次添加 GeoJSON source + CircleLayer
-  ///
-  /// 具体行为：
-  /// - 使用 addGeoJsonSource 将解析后的 Map 注册为一个名为 [_sourceId] 的数据源；
-  /// - 使用 addCircleLayer 将点数据以圆点的形式渲染，样式通过 expression 驱动，
-  ///   这些表达式在 GPU 侧执行，能够对大量 feature 实现高效渲染。
-  ///
-  /// 圆点样式说明：
-  /// - circleRadius 使用 zoom 插值（不同缩放级别圆点大小不同）；
-  /// - circleColor 使用 feature.properties.i（intensity）驱动颜色，从绿到黄到红；
-  /// - 其余属性调整视觉效果（opacity、blur）。
-  Future<void> _addLayerFirstTime(Map<String, dynamic> geoJsonMap) async {
-    final c = _controller;
-    if (c == null) return;
-
-    await c.addGeoJsonSource(_sourceId, geoJsonMap);
-
-    await c.addCircleLayer(
-      _sourceId,
-      _layerId,
-      CircleLayerProperties(
-        // 半径随缩放级别插值 —— GPU 侧计算，零 Dart 开销
-        circleRadius: [
-          'interpolate',
-          ['linear'],
-          ['zoom'],
-          15, 1.2,
-          18, 2.5,
-          20, 6.0,
-          22, 12.0,
-        ],
-        // 颜色由 "i"（intensity 0-1）驱动 —— data-driven，GPU 着色器执行
-        circleColor: [
-          'interpolate',
-          ['linear'],
-          ['get', 'i'],
-          0.0, '#00ff88',   // 低强度 → 绿色（已割草地面）
-          0.5, '#ffdd00',   // 中等   → 黄色
-          1.0, '#ff2200',   // 高强度 → 红色（障碍物）
-        ],
-        circleOpacity: 0.83,
-        circleBlur: 0.08,   // 轻微模糊，密集区域视觉更自然
-      ),
-    );
-
-    _layerAdded = true;
-    debugPrint('✅ [Step3] Layer 添加完成，共 $_pointCount 个点');
+    _pendingChunks.clear();
     if (mounted) setState(() {});
+
+    // 地图 ready 后开始定时模拟
+    _startSimulation();
   }
 
-  /// 热替换数据源：优先尝试使用插件的 setGeoJsonSource 接口直接替换 source 数据，
-  /// 若该方法不可用或抛出异常，再退回到移除旧 layer/source 并重建的新策略。
-  ///
-  /// 理由：直接 setGeoJsonSource 可以只替换数据而不需要移除/重建 layer，性能开销
-  /// 更小；但不同版本的 maplibre_gl 插件对这个 API 的支持不一，因此提供 fallback。
-  Future<void> _updateSource(Map<String, dynamic> geoJsonMap) async {
-    final c = _controller;
-    if (c == null) return;
-
-    debugPrint('🔄 热替换数据源...');
-
-    // 先尝试 setGeoJsonSource（不重建 layer，性能更好）
-    try {
-      await c.setGeoJsonSource(_sourceId, geoJsonMap);
-      debugPrint('✅ setGeoJsonSource 热替换成功');
-      return;
-    } catch (e) {
-      debugPrint('⚠️ setGeoJsonSource 失败，改用重建方式: $e');
-    }
-
-    // fallback：移除旧的再重建
-    try {
-      await c.removeLayer(_layerId);
-      await c.removeSource(_sourceId);
-    } catch (e) {
-      debugPrint('⚠️ 移除旧 layer/source 失败: $e');
-    }
-
-    _layerAdded = false;
-    await _addLayerFirstTime(geoJsonMap);
+  void _startSimulation() {
+    _simulationTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _addChunk(isInitial: false, count: 6000);
+    });
   }
 
-  // ── Build ──────────────────────────────────────────────────────────────────
+  // ── 清理 ──────────────────────────────────────────────────────────────────
+
+  void _cleanupFiles() {
+    try {
+      final dir = Directory(_tempDir ?? '');
+      if (!dir.existsSync()) return;
+      dir.listSync()
+          .whereType<File>()
+          .where((f) => f.path.contains('lidar_chunk_'))
+          .forEach((f) { try { f.deleteSync(); } catch (_) {} });
+    } catch (_) {}
+  }
+
+  // ── Build ────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -353,74 +462,57 @@ class _PointCloudMapPageState extends State<PointCloudMapPage> {
       appBar: AppBar(
         title: const Text('割草机 LiDAR 点云地图'),
         actions: [
-          _loading
-              ? const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            child: SizedBox(
-              width: 18,
-              height: 18,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: Colors.white,
-              ),
-            ),
-          )
-              : Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Center(
-              child: Text(
-                '${_formatCount(_pointCount)} pts',
-                style: const TextStyle(fontSize: 14),
-              ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            child: Text(
+              '${(_totalPoints / 1000).toStringAsFixed(0)}K pts'
+                  ' · ${_addedChunks.length} src',
+              style: const TextStyle(fontSize: 13),
             ),
           ),
         ],
       ),
-      body: MapLibreMap(
-        initialCameraPosition: CameraPosition(
-          target: latLon,
-          zoom: 18.5,
-        ),
-        styleString: styleUrl,
-        onMapCreated: _onMapCreated,
-        onStyleLoadedCallback: _onStyleLoaded,
-        trackCameraPosition: true,
-        myLocationEnabled: false,
-        compassEnabled: false,
-        rotateGesturesEnabled: false, // 禁用旋转：减少矩阵运算
-        tiltGesturesEnabled: false,   // 纯2D点云不需要倾斜视角
-      ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
+      body: Stack(
         children: [
-          // 新增 5000 点
-          FloatingActionButton.small(
-            heroTag: 'add',
-            onPressed: _loading
-                ? null
-                : () => _runFullPipeline(count: _pointCount + 5000),
-            tooltip: '新增 5000 点',
-            child: const Icon(Icons.add),
+          MapLibreMap(
+            initialCameraPosition: CameraPosition(target: latLon, zoom: 18.0),
+            styleString: styleUrl,
+            onMapCreated: _onMapCreated,
+            onStyleLoadedCallback: _onStyleLoaded,
+            trackCameraPosition: true,
+            myLocationEnabled: false,
+            compassEnabled: false,
+            rotateGesturesEnabled: false,
+            tiltGesturesEnabled: false,
           ),
-          const SizedBox(height: 8),
-          // 重置到 80000 点
-          FloatingActionButton.small(
-            heroTag: 'reset',
-            onPressed: _loading
-                ? null
-                : () => _runFullPipeline(count: 80000),
-            tooltip: '重置',
-            child: const Icon(Icons.refresh),
-          ),
+
+          // 轻量更新指示（不挡操作）
+          if (_pipelineRunning)
+            Positioned(
+              top: 8, right: 8,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 12, height: 12,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 1.5, color: Colors.greenAccent),
+                    ),
+                    SizedBox(width: 6),
+                    Text('更新中…',
+                        style: TextStyle(color: Colors.white70, fontSize: 12)),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
-  }
-
-  // 将点数格式化为人类可读形式（K、M 等），仅用于 UI 展示
-  String _formatCount(int n) {
-    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
-    if (n >= 1000) return '${(n / 1000).toStringAsFixed(0)}K';
-    return '$n';
   }
 }
