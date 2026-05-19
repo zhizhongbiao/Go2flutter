@@ -5,6 +5,6 @@ const String styleUrl = "https://api.maptiler.com/maps/hybrid/style.json?key=XOi
 
  const latLon=LatLng(22.93,113.23);
 
- const kLng = 113.23;
- const kLat = 22.94;
+ const long = 113.23;
+ const lati = 22.94;
  const kPoints = 1000000;

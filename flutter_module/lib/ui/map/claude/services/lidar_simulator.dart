@@ -21,8 +21,8 @@ class SimulatorConfig {
   final int targetPoints;
 
   const SimulatorConfig({
-    this.originLng = kLng,
-    this.originLat  = kLat,
+    this.originLng = long,
+    this.originLat  = lati,
     this.targetPoints = kPoints,
   });
 }

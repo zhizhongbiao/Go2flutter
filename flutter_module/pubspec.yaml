@@ -67,7 +67,7 @@ dev_dependencies:
   json_serializable: ^6.8.0
   freezed: ^3.0.0
 
-
+  flutter_map: ^7.0.2
 
 
 

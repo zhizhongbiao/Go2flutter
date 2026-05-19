@@ -85,8 +85,8 @@ class _LawnMapScreenState extends State<LawnMapScreen> {
     final t0 = DateTime.now();
     final FlatPointList flat = await runSimulatorInIsolate(
       const SimulatorConfig(
-        originLng:    kLng,
-        originLat:    kLat,
+        originLng:    long,
+        originLat:    lati,
         targetPoints: kPoints,
       ),
     );

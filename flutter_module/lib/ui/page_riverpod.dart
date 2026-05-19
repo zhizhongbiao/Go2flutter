@@ -12,6 +12,7 @@ import 'map/LidarExtremeMap.dart';
 import 'map/LidarHighPerfMap.dart';
 import 'map/LidarHighPerformanceMap.dart';
 import 'map/MapLibreExample.dart';
+import 'map/fluttermap/PureFlutterLidarPage.dart';
 import 'network/base_url_notifier.dart';
 
 class PageRiverpod extends ConsumerWidget {
